@@ -1,5 +1,6 @@
 package crawler
 
+import akka.actor.{Actor, Props, ActorSystem}
 import scala.xml.Node
 
 
@@ -14,11 +15,86 @@ import scala.xml.Node
  */
 case class Page(uri: String, anchors: List[String], links: List[String], scripts: List[String], images: List[String])
 
-class Crawler (baseUrl: String, protocol: String = "http://") {
+class Crawler (baseUrl: String, protocol: String = "http://") extends Actor {
+
+  protected val httpRequester = context.actorOf(Props[RequesterActor], name = "crawler")
 
   sealed case class RelPath(path: String)
   sealed case class AbsPath(path: String)
   sealed case class NonePath()
+
+  //The following three members contain mutable state.
+  val intransit = scala.collection.mutable.Set[String]()
+  val stack = scala.collection.mutable.Stack[String]()
+  val nodeMap = scala.collection.mutable.Map[String, Page]()
+
+  /**
+   * Handler receiving messages
+   */
+  def receive = {
+    case "start" =>
+      traverseHead
+    case OkResponse(pageNode, uri) =>
+
+      val page = processHtmlElements(pageNode, uri, accumulatePartial(baseUrl, uri) _)
+      val nc = page.anchors.filter(!nodeMap.contains(_)).filter(!intransit.contains(_))
+
+      nodeMap.put(uri, page)
+
+      intransit ++= nc
+      intransit.remove(uri)
+
+      nc.foreach(s => visitPage(s))
+
+    case InvalidResponse(uri) =>
+      nodeMap.put(uri, null)
+  }
+
+  /**
+   * Visits a uri. If it successfully visits it, it will pass on the contents of the page as a {Page} instance
+   * wrapped by {Some}, otherwise it will yield a {None}
+   *
+   * @param uri the uri to visit
+   * @return {Option} wrapping {Page}
+   */
+  def visitPage(uri: String) {
+    httpRequester ! HttpRequest(uri)
+  }
+
+  /**
+   * Given a valid xhtml node, looks for anchors, links, scripts, and images and summarizes it to a {Page} object
+   *
+   * @param xhtml xml.Node representation of the html
+   * @param traversedUri the unique identifier corresponding to this page
+   * @param accumulateOption a function which takes a string corresponsing to a resource as input and determines whether
+   *                         it should be included in the page summary. If it should, it (should) normalize it, and
+   *                         return it wrapped as Some(String), otherwise it returns {None}
+   *
+   */
+  def processHtmlElements(xhtml: Node, traversedUri: String, accumulateOption: (String) => Option[String]):Page = {
+
+    //An empty immutable Set as base case
+    val init = Set.empty[String]
+
+    // for those unfamiliar with scala, the following involves the XML processing library
+    // syntactic sugar - \\ and \ are functions mimicking XPath operators, (dotting methods in Scala is implicit)
+
+    //look for anchor nodes (<a>'s)
+    val anchors = (xhtml \\ "a").foldLeft(init) { (acc, anchor) =>
+      acc ++ accumulateOption((anchor \ "@href").text) }
+
+    //for link nodes (<link>'s) canonical links and shortlinks will be considered static
+    val links = (xhtml \\ "link").foldLeft(init) { (acc, link) =>
+      acc ++ accumulateOption((link \ "@href").text) }
+    //script tags
+    val scripts = (xhtml \\ "script").foldLeft(init) { (acc, script) =>
+      acc ++ accumulateOption((script \ "@src").text) }
+    //image tags
+    val imgs = (xhtml \\ "img").foldLeft(init) { (acc, img) =>
+      acc ++ accumulateOption((img \ "@src").text) }
+
+    Page(traversedUri, anchors.toList, links.toList, scripts.toList, imgs.toList)
+  }
 
   /**
    * A curried function representing if a path should be traversable.
@@ -33,7 +109,6 @@ class Crawler (baseUrl: String, protocol: String = "http://") {
   def accumulatePartial(basePath:String, traversedUri:String)(candidatePath:String) : Option[String] = {
 
     //ok, this only accepts http and http - does not allow ftp etc
-
     val acceptAbs = List(
       s"http://www.$basePath",
       s"https://www.$basePath"
@@ -80,123 +155,25 @@ class Crawler (baseUrl: String, protocol: String = "http://") {
   }
 
   /**
-   * Given a valid xhtml node, looks for anchors, links, scripts, and images and summarizes it to a {Page} object
-   *
-   * @param xhtml xml.Node representation of the html
-   * @param traversedUri the unique identifier corresponding to this page
-   * @param accumulateOption a function which takes a string corresponsing to a resource as input and determines whether
-   *                         it should be included in the page summary. If it should, it (should) normalize it, and
-   *                         return it wrapped as Some(String), otherwise it returns {None}
-   *
-   */
-  def processHtmlElements(xhtml: Node, traversedUri: String, accumulateOption: (String) => Option[String]):Page = {
-
-    //An empty immutable Set as base case
-    val init = Set.empty[String]
-
-    // for those unfamiliar with scala, the following involves the XML processing library
-    // syntactic sugar - \\ and \ are functions mimicking XPath operators, (dotting methods in Scala is implicit)
-
-    //look for anchor nodes (<a>'s)
-    val anchors = (xhtml \\ "a").foldLeft(init) { (acc, anchor) =>
-                                                    acc ++ accumulateOption((anchor \ "@href").text) }
-
-    //for link nodes (<link>'s) canonical links and shortlinks will be considered static
-    val links = (xhtml \\ "link").foldLeft(init) { (acc, link) =>
-                                                      acc ++ accumulateOption((link \ "@href").text) }
-    //script tags
-    val scripts = (xhtml \\ "script").foldLeft(init) { (acc, script) =>
-                                                          acc ++ accumulateOption((script \ "@src").text) }
-    //image tags
-    val imgs = (xhtml \\ "img").foldLeft(init) { (acc, img) =>
-                                                      acc ++ accumulateOption((img \ "@src").text) }
-
-    Page(traversedUri, anchors.toList, links.toList, scripts.toList, imgs.toList)
-  }
-
-  /**
-   * Traverses a path and continues along its edges until the dependency graph ends.
-   * Discovery is done depth-first if done serially
-   *
-   * @param path
-   */
-  def traverse(path: String) = {
-
-    //within here we have some mutable state. it is possible to do this with immutable collections and tailrec but that
-    // is a pain in the ass and pretty uneffish... plus it would be impossible to follow
-
-    val intransit = scala.collection.mutable.Set[String]()
-    val stack = scala.collection.mutable.Stack[String]()
-    val nodeMap = scala.collection.mutable.Map[String, Page]()
-
-    def visitNodePromise (res:Option[Page], triedUri: String) {
-      res match {
-        case Some(page) =>
-          val nc = page.anchors.filter(!nodeMap.contains(_))
-            .filter(!intransit.contains(_))
-
-          intransit ++= nc
-          stack.pushAll(nc)
-
-          nodeMap.put(triedUri, page)
-          intransit.remove(triedUri)
-        case None =>
-          nodeMap.put(triedUri, null)
-      }
-    }
-
-    stack.push(path)
-
-    val MAX_CONQ = 1
-
-    while (!stack.isEmpty) {
-
-      val items = stack.take(MAX_CONQ).toList
-      (1 to items.length).foreach(stack.pop())
-
-      items.foreach(subpath => {
-        println("visiting " + subpath)
-        val stuff = visitPage(subpath)
-        visitNodePromise(stuff, subpath)
-      })
-    }
-  }
-
-  /**
-   * Visits a uri. If it successfully visits it, it will pass on the contents of the page as a {Page} instance
-   * wrapped by {Some}, otherwise it will yield a {None}
-   *
-   * @param uri the uri to visit
-   * @return {Option} wrapping {Page}
-   */
-  def visitPage(uri: String): Option[Page] = {
-
-    val uriBinded = uri
-
-    HtmlLoader.get(uri) match {
-      case res:ValidResult =>
-        Some(processHtmlElements(res.content, uriBinded, accumulatePartial(baseUrl, uriBinded) _))
-      case res:InvalidResult =>
-        None
-      case _ =>
-        None
-    }
-  }
-
-  /**
    * Kicks off crawling on the instance
    */
   def traverseHead = {
-    traverse(protocol + "www." + baseUrl)
+    visitPage(protocol + "www." + baseUrl)
   }
 }
 
 object Crawler {
+
+  protected val system = ActorSystem("crawlerSystem")
+
   /**
    * The main entry point of the crawler
    * @param args
    */
   def main(args: Array[String]) {
-    val vertex = (new Crawler("digitalocean.com", "https://")).traverseHead
+
+    val crawlerActor = system.actorOf(Props(new Crawler("google.com", "https://")), name = "helloactor")
+
+    crawlerActor ! "start"
   }
 }

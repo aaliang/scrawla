@@ -15,50 +15,70 @@ import scala.xml.Node
  */
 case class Page(uri: String, anchors: List[String], links: List[String], scripts: List[String], images: List[String])
 
-class Crawler (baseUrl: String, protocol: String = "http://") extends Actor {
+/**
+ * Common behavior for all crawler types
+ * @param baseUrl
+ * @param protocol
+ */
+class CrawlerActor (baseUrl: String, protocol: String = "http://") extends Actor {
 
   protected val httpRequester = context.actorOf(Props[RequesterActor], name = "crawler")
 
-  sealed case class RelPath(path: String)
-  sealed case class AbsPath(path: String)
-  sealed case class NonePath()
+  val crawler = new DefaultCrawler(baseUrl, protocol)
 
-  //The following three members contain mutable state.
+  //The following two members contain mutable state.
   val intransit = scala.collection.mutable.Set[String]()
-  val stack = scala.collection.mutable.Stack[String]()
   val nodeMap = scala.collection.mutable.Map[String, Page]()
 
   /**
-   * Handler receiving messages
+   * Delegates visiting a {uri} to the {httpRequester}
+   *
+   * @param uri the uri to visit
    */
+  def visitPage(uri: String) = httpRequester ! HttpRequest(uri)
+
   def receive = {
-    case "start" =>
-      traverseHead
+    case "start" => visitPage(protocol + "www." + baseUrl)
+    /**
+     * If we receive an {OkResponse}, that's great; we'll get all relevant items from the html and try to
+     * visit any matched anchor links
+     */
     case OkResponse(pageNode, uri) =>
 
-      val page = processHtmlElements(pageNode, uri, accumulatePartial(baseUrl, uri) _)
-      val nc = page.anchors.filter(!nodeMap.contains(_)).filter(!intransit.contains(_))
+      val page = crawler.processHtmlElements(pageNode, uri, crawler.accumulatePartial(baseUrl, uri) _)
+      val notVisitedYet = page.anchors.filter(!nodeMap.contains(_)).filter(!intransit.contains(_))
 
       nodeMap.put(uri, page)
 
-      intransit ++= nc
+      intransit ++= notVisitedYet
       intransit.remove(uri)
 
-      nc.foreach(s => visitPage(s))
+      notVisitedYet.foreach(s => visitPage(s))
 
+    /**
+     * If we receive an {InvalidResponse}, that's fine; we'll just mark it as null such that we don't try again
+     */
     case InvalidResponse(uri) =>
       nodeMap.put(uri, null)
   }
+}
 
-  /**
-   * Visits a uri. If it successfully visits it, it will pass on the contents of the page as a {Page} instance
-   * wrapped by {Some}, otherwise it will yield a {None}
-   *
-   * @param uri the uri to visit
-   * @return {Option} wrapping {Page}
-   */
-  def visitPage(uri: String) {
-    httpRequester ! HttpRequest(uri)
+sealed case class RelPath(path: String)
+sealed case class AbsPath(path: String)
+sealed case class NonePath()
+
+/**
+ * Currently the only crawler type. Will only follow links on the same domain
+ * @param baseUrl
+ * @param protocol
+ */
+class DefaultCrawler (baseUrl: String, protocol: String = "http://") {
+
+  val defaultNormalizationFn = (url:String) => {
+    UrlUtils.toNormalizationStrategy(url, Seq(
+      UrlUtils.useLowerCase _,
+      UrlUtils.ensureProtocol(protocol) _
+    ))
   }
 
   /**
@@ -106,7 +126,7 @@ class Crawler (baseUrl: String, protocol: String = "http://") extends Actor {
    * @param candidatePath the path that we're considering traversing
    * @return
    */
-  def accumulatePartial(basePath:String, traversedUri:String)(candidatePath:String) : Option[String] = {
+  def accumulatePartial (basePath:String, traversedUri:String)(candidatePath:String) : Option[String] = {
 
     //ok, this only accepts http and http - does not allow ftp etc
     val acceptAbs = List(
@@ -114,27 +134,27 @@ class Crawler (baseUrl: String, protocol: String = "http://") extends Actor {
       s"https://www.$basePath"
     )
 
-    val normalizationFn = (url:String) => {
-      UrlPathUtils.toNormalizationStrategy(url, Seq(
-        UrlPathUtils.useLowerCase _,
-        UrlPathUtils.ensureProtocol(protocol) _
-      ))
-    }
-
     //regexes are unmaintainable!
     val cand = candidatePath.trim match {
-      case "" => NonePath
-      case s if s.startsWith("#") => NonePath
-      case s if s.startsWith("javascript:") => NonePath
+      case "" =>
+        NonePath
+      case s if (s.startsWith("javascript:") || s.startsWith("mailto:") || s.startsWith("#")) =>
+        NonePath
       case s if s.startsWith("//") => s.drop(2) match { //protocol agnostic
-        case ss if ss.startsWith(basePath) => AbsPath(ss)
-        case _ => NonePath }
-      case s if (s.startsWith("/")) => AbsPath(basePath + s)
+        case ss if ss.startsWith(basePath) =>
+          AbsPath(ss)
+        case _ =>
+          NonePath
+      }
+      case s if (s.startsWith("/")) =>
+        AbsPath(basePath + s)
       case s if (s.startsWith(s"http://$basePath")
         || s.startsWith(s"https://$basePath")
         || s.startsWith(s"www.$basePath")
-        || acceptAbs.exists(s.startsWith(_))) => AbsPath(s)
-      case s if s.startsWith(".") => RelPath(s)
+        || acceptAbs.exists(s.startsWith(_))) =>
+        AbsPath(s)
+      case s if s.startsWith(".") =>
+        RelPath(s)
       case s => s match {
         case ss if (List("http://", "https://", "www.").exists(ss.startsWith(_))) =>
           NonePath
@@ -145,21 +165,15 @@ class Crawler (baseUrl: String, protocol: String = "http://") extends Actor {
 
     cand match {
       case AbsPath(path) =>
-        Some(UrlPathUtils.normalize(path, normalizationFn))
+        Some(UrlUtils.normalize(path, defaultNormalizationFn))
       case RelPath(s) =>
-        val relPath = UrlPathUtils.resolveRelativeOptimistic(traversedUri, s)
+        val relPath = UrlUtils.resolveRelativeOptimistic(traversedUri, s)
 
-        Some(UrlPathUtils.normalize(relPath, normalizationFn))
+        Some(UrlUtils.normalize(relPath, defaultNormalizationFn))
       case NonePath => None
     }
   }
 
-  /**
-   * Kicks off crawling on the instance
-   */
-  def traverseHead = {
-    visitPage(protocol + "www." + baseUrl)
-  }
 }
 
 object Crawler {
@@ -172,7 +186,7 @@ object Crawler {
    */
   def main(args: Array[String]) {
 
-    val crawlerActor = system.actorOf(Props(new Crawler("google.com", "https://")), name = "helloactor")
+    val crawlerActor = system.actorOf(Props(new CrawlerActor("google.com", "https://")), name = "crawlerActor")
 
     crawlerActor ! "start"
   }

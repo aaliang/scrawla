@@ -6,7 +6,7 @@ import org.scalatest.{BeforeAndAfterEach, BeforeAndAfter, FunSpec}
 class CrawlerSpec extends FunSpec with BeforeAndAfter with BeforeAndAfterEach {
 
   val base = "mysite.com"
-  val crawler = new Crawler(base, "http://")
+  val crawler = new DefaultCrawler(base, "http://")
 
   describe ("accumulatePartial tests") {
     val getIfElligible = crawler.accumulatePartial(base, "http://www.mysite.com/a/") _

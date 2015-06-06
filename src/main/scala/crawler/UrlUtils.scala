@@ -7,7 +7,13 @@ import scalax.file.Path
  * Adapts scalax.file.Path for use with web urls
  *
  */
-object UrlPathUtils {
+object UrlUtils {
+
+
+  def extractProtocolAndBase (path:String): (String, String) = path match {
+    case s if s.startsWith("http://") => ("http://", s.drop("http://" length))
+    case s if s.startsWith("https://") => ("https://", s.drop("https://" length))
+  }
 
   /**
    * Resolves two paths. The {from} path is assumed to be an absolute url. The {to} path is relative
@@ -21,10 +27,7 @@ object UrlPathUtils {
 
     //Path will reduce double slashes to single slashes. This is unideal
     //when dealing with web urls.
-    val (protocol, base) = from match {
-      case s if s.startsWith("http://") => ("http://", s.drop("http://" length))
-      case s if s.startsWith("https://") => ("https://", s.drop("https://" length))
-    }
+    val (protocol, base) = extractProtocolAndBase(from)
 
     protocol + Path.fromString(base)
                     .resolve(Path.fromString(to))
@@ -45,19 +48,12 @@ object UrlPathUtils {
 
     //Path will reduce double slashes to single slashes. This is unideal
     //when dealing with web urls.
-    val (protocol, base:String) = from match {
-      case s if s.startsWith("http://") => ("http://", s.drop("http://" length))
-      case s if s.startsWith("https://") => ("https://", s.drop("https://" length))
-    }
+    val (protocol, base) = extractProtocolAndBase(from)
 
     //this is a naïve approach. this will fall apart if the top-level domain happens to be any of the following
     //also, there is no way to tell if a file maps to a directory (backed by a default) without making the request
     val nbase = base match {
-      case b if (b.endsWith(".html")
-        || b.endsWith(".htm")
-        || b.endsWith(".jsp")
-        || b.endsWith(".asp")
-        || b.endsWith(".aspx")) => b.reverse.dropWhile(c => c != '/').reverse
+      case b if possiblyAFile(b) => b.reverse.dropWhile(c => c != '/').reverse
       case b => b
     }
 
@@ -66,6 +62,23 @@ object UrlPathUtils {
       .normalize
       .path
 
+  }
+
+  /**
+   * Checks if a path is possibly mapped to a file, based purely on the name
+   * @param path
+   * @return
+   */
+  def possiblyAFile (path:String):Boolean = {
+    if (path.endsWith(".html")
+      || path.endsWith(".htm")
+      || path.endsWith(".jsp")
+      || path.endsWith(".asp")
+      || path.endsWith(".aspx")) {
+      true
+    } else {
+      false
+    }
   }
 
 
@@ -80,13 +93,7 @@ object UrlPathUtils {
    * @return
    */
   def normalize (path: String) : String = {
-
-    //Path will reduce double slashes to single slashes. This is unideal
-    //when dealing with web urls.
-    val (protocol, base) = path match {
-      case s if s.startsWith("http://") => ("http://", s.drop("http://" length))
-      case s if s.startsWith("https://") => ("https://", s.drop("https://" length))
-    }
+    val (protocol, base) = extractProtocolAndBase(path)
 
     protocol + Path.fromString(base)
       .normalize
@@ -119,10 +126,68 @@ object UrlPathUtils {
   //there is no way to tell for sure if the filename part of a url refers to a directory or file without
   //actually fetching it... we can infer the type based on the file extension... but that is still a naive assumption
   //as there are no guarantees
-  def addTrailingBackslash (path: String) = {
-    path match {
-      case s if s.endsWith("/") => s
-      case s => s + "/"
+  def addTrailingBackslash (path: String) = path match {
+    case s if s.endsWith("/") => s
+    case s => s + "/"
+  }
+
+  /**
+   * Adds www if it does not appear in the path
+   * This is somewhat naïve as well, and it will do stuff like http://api.google.com -> http://www.api.google.com
+   *
+   * @param path assumed to start with http:// or https://
+   * @return
+   */
+  def addWww (path:String) = path match {
+    case s if (s.startsWith("http://www.") || s.startsWith("https://www.")) => s
+    case s if (s.startsWith("http://")) || s.startsWith("https://") => {
+      val (protocol, base) = extractProtocolAndBase(s)
+      protocol + "www." + base
     }
+  }
+
+  def removeWwwFromPathWithProtocol (path:String) = path match {
+    case s if s.startsWith("http://www.") =>
+      "http://" + s.drop("http://www." length)
+    case s if s.startsWith("https://www.") =>
+      "https://" + s.drop("https://www." length)
+    case s => s
+  }
+
+  /**
+   * Given a path, tries to provide normalized possibilities.
+   *
+   * ex.
+   *
+   * http://mysite.com/a
+   * http://www.mysite.com/a
+   * http://mysite.com/a/
+   *
+   * are all possible candidates which may or may not point to the same resource.
+   * @param path
+   */
+  def getNormalizedCandidates(path:String):List[String] = {
+
+    var list = List[String]()
+
+    val withWww = addWww(path)
+    list ::= withWww
+
+    val withoutWww = removeWwwFromPathWithProtocol(path)
+    list ::= withoutWww
+
+    if (!possiblyAFile(path)) {
+      //i think we'll only add backslashes, don't remove them if provided
+      val woatb = addTrailingBackslash(withoutWww)
+      if (woatb != withoutWww) {
+        list ::= woatb
+      }
+      val watb = addTrailingBackslash(withWww)
+      if (watb != withWww) {
+        list ::= watb
+      }
+    }
+
+    list
   }
 }

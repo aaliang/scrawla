@@ -54,7 +54,6 @@ class RequesterActor extends Actor {
     }
   }
 
-
   def receive = {
 
     case HttpRequest(url) =>

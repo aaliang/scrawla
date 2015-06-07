@@ -1,21 +1,24 @@
 package crawler
 
 import akka.actor.Actor
-import akka.actor.Status.{Success, Failure}
 import scala.concurrent.ExecutionContext.Implicits.global
+import scala.util.{Success, Failure}
 
-case class HttpRequest(requestUrl:String)
+case class HttpRequest(fallbacks: List[String])
 
+case class BadResponse(url:String, fallbacks: List[String])
 
 /**
- * Created by aliang on 6/5/15.
+ * Important note: this must be instantiated with a PinnedDispatcher. Otherwise the member variables may have
+ * synchronization issues
  */
 class RequesterActor extends Actor {
 
-  val MAX_CONCURRENCY = 6
+  val MAX_CONCURRENCY = 10
   var outstandingRequests = 0
+  val parent = context.parent
 
-  val queue = scala.collection.mutable.Queue[String]()
+  val queue = scala.collection.mutable.Queue[HttpRequest]()
 
   def shouldTryNext = {
     if (outstandingRequests < MAX_CONCURRENCY) {
@@ -32,32 +35,44 @@ class RequesterActor extends Actor {
   }
 
   def tryNext {
-    val url = queue.dequeue
-    val parent = context.parent
+    val request = queue.dequeue
+
+    val url = request.fallbacks.head
 
     outstandingRequests += 1
 
-//    println("trying " + url)
+    println("trying: " + url)
 
-    HtmlLoader.get(url).map {
+    val fut = HtmlLoader.get(url)
+
+    fut.onFailure {
+      case s =>
+        println("failed")
+        tryNextIfAble
+    }
+
+    fut.onSuccess {
       case validResult:OkResponse =>
         println("visted: " + url)
         parent ! validResult
         tryNextIfAble
-      case invalid:InvalidResponse =>
-        println("invalid: " + url)
-        parent ! invalid
+      case InvalidResponse(badUrl) =>
+        println("invalid: " + badUrl)
         tryNextIfAble
-      case _ =>
-        println("other invalid")
+        parent ! BadResponse(badUrl, request.fallbacks)
+      case MalformedUrl(malformed) =>
+        println("malformed url " + malformed)
+        //don't try to retry (like above does)
+        tryNextIfAble
+      case s =>
         tryNextIfAble
     }
   }
 
   def receive = {
 
-    case HttpRequest(url) =>
-      queue += url
+    case httpRequest:HttpRequest =>
+      queue += httpRequest
 
       if (shouldTryNext) {
         tryNext

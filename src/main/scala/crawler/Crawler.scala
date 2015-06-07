@@ -3,7 +3,6 @@ package crawler
 import akka.actor.{Actor, Props, ActorSystem}
 import scala.xml.Node
 
-
 /**
  * Datatype representing an html page
  *
@@ -22,7 +21,7 @@ case class Page(uri: String, anchors: List[String], links: List[String], scripts
  */
 class CrawlerActor (baseUrl: String, protocol: String = "http://") extends Actor {
 
-  protected val httpRequester = context.actorOf(Props[RequesterActor], name = "crawler")
+  val httpRequester = context.actorOf(Props[RequesterActor].withDispatcher("my-dispatcher"), name = "requester")
 
   val crawler = new DefaultCrawler(baseUrl, protocol)
 
@@ -35,10 +34,14 @@ class CrawlerActor (baseUrl: String, protocol: String = "http://") extends Actor
    *
    * @param uri the uri to visit
    */
-  def visitPage(uri: String) = httpRequester ! HttpRequest(uri)
+  def visitPage(fallbacks: List[String]) = {
+    httpRequester ! HttpRequest(fallbacks)
+  }
 
   def receive = {
-    case "start" => visitPage(protocol + "www." + baseUrl)
+    case "start" =>
+      val url = protocol + "www." + baseUrl
+      visitPage(List(url))
     /**
      * If we receive an {OkResponse}, that's great; we'll get all relevant items from the html and try to
      * visit any matched anchor links
@@ -48,18 +51,26 @@ class CrawlerActor (baseUrl: String, protocol: String = "http://") extends Actor
       val page = crawler.processHtmlElements(pageNode, uri, crawler.accumulatePartial(baseUrl, uri) _)
       val notVisitedYet = page.anchors.filter(!nodeMap.contains(_)).filter(!intransit.contains(_))
 
+      //TODO: instransit is not correct
       nodeMap.put(uri, page)
 
       intransit ++= notVisitedYet
       intransit.remove(uri)
 
-      notVisitedYet.foreach(s => visitPage(s))
+      notVisitedYet.foreach(s => visitPage(UrlUtils.getNormalizedCandidates(s)))
 
     /**
      * If we receive an {InvalidResponse}, that's fine; we'll just mark it as null such that we don't try again
      */
-    case InvalidResponse(uri) =>
-      nodeMap.put(uri, null)
+    case BadResponse(uri, fallbacks) =>
+      nodeMap.put(uri, null) //todo: need a link
+
+      intransit.remove(uri)
+
+      val newFallbacks = fallbacks.tail
+      if (!newFallbacks.isEmpty){
+        visitPage(newFallbacks)
+      }
   }
 }
 
@@ -138,7 +149,10 @@ class DefaultCrawler (baseUrl: String, protocol: String = "http://") {
     val cand = candidatePath.trim match {
       case "" =>
         NonePath
-      case s if (s.startsWith("javascript:") || s.startsWith("mailto:") || s.startsWith("#")) =>
+      case s if (s.startsWith("javascript:")
+        || s.startsWith("mailto:")
+        ||s.startsWith("tel:")
+        || s.startsWith("#")) =>
         NonePath
       case s if s.startsWith("//") => s.drop(2) match { //protocol agnostic
         case ss if ss.startsWith(basePath) =>
@@ -168,7 +182,6 @@ class DefaultCrawler (baseUrl: String, protocol: String = "http://") {
         Some(UrlUtils.normalize(path, defaultNormalizationFn))
       case RelPath(s) =>
         val relPath = UrlUtils.resolveRelativeOptimistic(traversedUri, s)
-
         Some(UrlUtils.normalize(relPath, defaultNormalizationFn))
       case NonePath => None
     }
@@ -186,7 +199,7 @@ object Crawler {
    */
   def main(args: Array[String]) {
 
-    val crawlerActor = system.actorOf(Props(new CrawlerActor("google.com", "https://")), name = "crawlerActor")
+    val crawlerActor = system.actorOf(Props(new CrawlerActor("nba.com", "https://")), name = "crawlerActor")
 
     crawlerActor ! "start"
   }

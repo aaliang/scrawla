@@ -9,7 +9,11 @@ import scalax.file.Path
  */
 object UrlUtils {
 
-
+  /**
+   * Splits a path into a (protocol, base) tuple
+   * @param path
+   * @return
+   */
   def extractProtocolAndBase (path:String): (String, String) = path match {
     case s if s.startsWith("http://") => ("http://", s.drop("http://" length))
     case s if s.startsWith("https://") => ("https://", s.drop("https://" length))
@@ -25,8 +29,6 @@ object UrlUtils {
    */
   def resolveRelative (from: String, to: String): String = {
 
-    //Path will reduce double slashes to single slashes. This is unideal
-    //when dealing with web urls.
     val (protocol, base) = extractProtocolAndBase(from)
 
     protocol + Path.fromString(base)
@@ -46,8 +48,6 @@ object UrlUtils {
    */
   def resolveRelativeOptimistic (from: String, to: String): String = {
 
-    //Path will reduce double slashes to single slashes. This is unideal
-    //when dealing with web urls.
     val (protocol, base) = extractProtocolAndBase(from)
 
     //this is a naïve approach. this will fall apart if the top-level domain happens to be any of the following
@@ -87,7 +87,7 @@ object UrlUtils {
   }
 
   /**
-   * Normalizes a path
+   * Normalizes a path using the default normalization method
    *
    * @param path the base absolute e.g. "http://google.com/./about"
    * @return
@@ -123,9 +123,12 @@ object UrlUtils {
     path.toLowerCase
   }
 
-  //there is no way to tell for sure if the filename part of a url refers to a directory or file without
-  //actually fetching it... we can infer the type based on the file extension... but that is still a naive assumption
-  //as there are no guarantees
+  /**
+   * Appends a trailing backslash to a string if it does not already end with one.
+   *
+   * @param path
+   * @return
+   */
   def addTrailingBackslash (path: String) = path match {
     case s if s.endsWith("/") => s
     case s => s + "/"
@@ -146,6 +149,12 @@ object UrlUtils {
     }
   }
 
+  /**
+   * Removes www from a string (if it exists) otherwise returns the input
+   *
+   * @param path
+   * @return
+   */
   def removeWwwFromPathWithProtocol (path:String) = path match {
     case s if s.startsWith("http://www.") =>
       "http://" + s.drop("http://www." length)

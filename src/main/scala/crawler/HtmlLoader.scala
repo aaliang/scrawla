@@ -31,13 +31,13 @@ case class OkResponse (content: Node, requestUri: String) extends HtmlResult
 
 /**
  *
- * ADT for a redirected result (301, 303, etc)
+ * ADT for a malformed url. This should be done synchronously though (below) but for now it isn't
  *
- * @param content
  * @param requestUri
- * @param redirectTo
  */
-case class RedirectResponse (content: Node, requestUri: String, redirectTo: String ) extends HtmlResult
+case class MalformedUrl (requestUri: String) extends HtmlResult {
+  def content:Node = null
+}
 
 /**
  * Static namespace to load HTML as XML
@@ -48,8 +48,10 @@ object HtmlLoader {
   //parser to convert HTML to well-formed XML
   lazy val parser = (new SAXFactoryImpl).newSAXParser
 
-  val http = Http.configure(_.setAllowPoolingConnection(true)
-    .setFollowRedirects(true))
+  val http = Http.configure(
+    _.setFollowRedirects(true)
+    .setAllowPoolingConnection(true).setRequestTimeoutInMs(15000).setConnectionTimeoutInMs(15000))
+
   /**
    * Connects to a uri (assumed to be over http) and loads HTML into a well-formed {scala.xml.Node}
    *
@@ -57,13 +59,23 @@ object HtmlLoader {
    * @return the node to return
    */
   def get(uri: String): Future[HtmlResult] = {
-    val request = http.configure(_.setFollowRedirects(true))(url(uri) OK as.String)
 
-    (for (c <- request) yield {
-      val inputStream = new ByteArrayInputStream(c.getBytes(StandardCharsets.UTF_8))
-      OkResponse(adapter.loadXML(new InputSource(inputStream), parser), uri)
-    }).recover {
-      case _ => InvalidResponse(uri)
+    try {
+
+      val request = http(url(uri) OK as.String).option
+
+      (for (c <- request) yield {
+        c match {
+          case Some(s) =>
+            val inputStream = new ByteArrayInputStream(s.getBytes(StandardCharsets.UTF_8))
+            OkResponse(adapter.loadXML(new InputSource(inputStream), parser), uri)
+
+          case None =>
+            InvalidResponse(uri)
+        }
+      })
+    } catch {
+      case e:Throwable => Future{MalformedUrl(uri)}
     }
   }
 

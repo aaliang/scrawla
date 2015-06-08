@@ -1,7 +1,12 @@
 package crawler
 
-import akka.actor.{Actor, Props, ActorSystem}
+import akka.actor.{Props, ActorSystem}
+import akka.util.Timeout
+import com.typesafe.config.ConfigFactory
+import scala.concurrent.duration._
 import scala.xml.Node
+import akka.pattern.{AskTimeoutException, ask}
+import scala.concurrent.ExecutionContext.Implicits.global
 
 /**
  * Datatype representing an html page
@@ -14,69 +19,9 @@ import scala.xml.Node
  */
 case class Page(uri: String, anchors: List[String], links: List[String], scripts: List[String], images: List[String])
 
-/**
- * Common behavior for all crawler types
- * @param baseUrl
- * @param protocol
- */
-class CrawlerActor (baseUrl: String, protocol: String = "http://") extends Actor {
-
-  val httpRequester = context.actorOf(Props[RequesterActor].withDispatcher("my-dispatcher"), name = "requester")
-
-  val crawler = new DefaultCrawler(baseUrl, protocol)
-
-  //The following two members contain mutable state.
-  val intransit = scala.collection.mutable.Set[String]()
-  val nodeMap = scala.collection.mutable.Map[String, Page]()
-
-  /**
-   * Delegates visiting a {uri} to the {httpRequester}
-   *
-   * @param uri the uri to visit
-   */
-  def visitPage(fallbacks: List[String]) = {
-    httpRequester ! HttpRequest(fallbacks)
-  }
-
-  def receive = {
-    case "start" =>
-      val url = protocol + "www." + baseUrl
-      visitPage(List(url))
-    /**
-     * If we receive an {OkResponse}, that's great; we'll get all relevant items from the html and try to
-     * visit any matched anchor links
-     */
-    case OkResponse(pageNode, uri) =>
-
-      val page = crawler.processHtmlElements(pageNode, uri, crawler.accumulatePartial(baseUrl, uri) _)
-      val notVisitedYet = page.anchors.filter(!nodeMap.contains(_)).filter(!intransit.contains(_))
-
-      //TODO: instransit is not correct
-      nodeMap.put(uri, page)
-
-      intransit ++= notVisitedYet
-      intransit.remove(uri)
-
-      notVisitedYet.foreach(s => visitPage(UrlUtils.getNormalizedCandidates(s)))
-
-    /**
-     * If we receive an {InvalidResponse}, that's fine; we'll just mark it as null such that we don't try again
-     */
-    case BadResponse(uri, fallbacks) =>
-      nodeMap.put(uri, null) //todo: need a link
-
-      intransit.remove(uri)
-
-      val newFallbacks = fallbacks.tail
-      if (!newFallbacks.isEmpty){
-        visitPage(newFallbacks)
-      }
-  }
-}
-
-sealed case class RelPath(path: String)
-sealed case class AbsPath(path: String)
-sealed case class NonePath()
+case class RelPath(path: String)
+case class AbsPath(path: String)
+case object NonePath
 
 /**
  * Currently the only crawler type. Will only follow links on the same domain
@@ -85,11 +30,109 @@ sealed case class NonePath()
  */
 class DefaultCrawler (baseUrl: String, protocol: String = "http://") {
 
+  val conf = ConfigFactory.load()
+
+  val system = ActorSystem("crawlerSystem", conf.getConfig("crawler"))
+
+  val httpRequester = system.actorOf(Props[RequesterActor].withDispatcher("request-dispatcher"), name = "requester")
+
+  implicit val timeout = Timeout(8 seconds)
+
+  //The following two members contain mutable state.
+  val nodeMap = scala.collection.mutable.Map[String, Page]()
+  var queued = scala.collection.mutable.LinkedHashSet[String]()
+  val outboundRequests = scala.collection.mutable.Set[String]()
+  val OUTBOUND_LIMIT = 6
+
+  def take(): Unit = {
+    val (take, remainder) = queued.splitAt(OUTBOUND_LIMIT - outboundRequests.size)
+    queued = remainder
+    take.foreach(s => visitPage(UrlUtils.getNormalizedCandidates(s)))
+  }
+
+  /**
+   * Delegates visiting a {uri} to the {httpRequester}
+   *
+   * @param fallbacks the uri to visit
+   */
+  def visitPage(fallbacks: List[String]) {
+    val fut = httpRequester ? HttpRequest(fallbacks)
+
+    val requestingUrl = fallbacks.head
+    outboundRequests.add(requestingUrl)
+
+//    println(outboundRequests)
+
+    fut.onSuccess {
+      /**
+       * If we receive an {OkResponse}, that's great; we'll get all relevant items from the html and try to
+       * visit any matched anchor links
+       */
+      case OkResponse(pageNode, uri) =>
+        outboundRequests.remove(requestingUrl)
+        queued.remove(requestingUrl)
+        try {
+          val page = processHtmlElements(pageNode, requestingUrl, accumulatePartial(baseUrl, requestingUrl) _)
+          val notVisitedYet = page.anchors.filter(!nodeMap.contains(_)).filter(!queued.contains(_))
+          nodeMap.put(requestingUrl, page)
+          queued ++= notVisitedYet
+        } finally {
+          take
+        }
+
+      /**
+       * If we receive an {InvalidResponse}, that's fine; we'll just mark it as null such that we don't try again
+       */
+      case BadResponse(uri, fallbacks) =>
+        nodeMap.put(requestingUrl, null) //todo: need a link
+
+        outboundRequests.remove(requestingUrl)
+        queued.remove(requestingUrl)
+
+        val newFallbacks = fallbacks.tail
+        if (!newFallbacks.isEmpty){
+          visitPage(newFallbacks)
+        } else {
+          take
+        }
+
+      case rest =>
+        outboundRequests.remove(requestingUrl)
+        queued.remove(requestingUrl)
+        take
+
+
+    }
+
+    fut.onFailure {
+      case e:AskTimeoutException =>
+        println("ask timeout: " + requestingUrl)
+        outboundRequests.remove(requestingUrl)
+        queued.remove(requestingUrl)
+        take
+      case other:Throwable =>
+        outboundRequests.remove(requestingUrl)
+        queued.remove(requestingUrl)
+        take
+    }
+  }
+
+  /**
+   * Default url normalization strategy
+   */
   val defaultNormalizationFn = (url:String) => {
     UrlUtils.toNormalizationStrategy(url, Seq(
       UrlUtils.useLowerCase _,
       UrlUtils.ensureProtocol(protocol) _
     ))
+  }
+
+  /**
+   * Starts crawling on the top level domain
+   */
+  def start = {
+    val url = protocol + "www." + baseUrl
+    visitPage(List(url))
   }
 
   /**
@@ -190,17 +233,19 @@ class DefaultCrawler (baseUrl: String, protocol: String = "http://") {
 }
 
 object Crawler {
-
-  protected val system = ActorSystem("crawlerSystem")
-
   /**
    * The main entry point of the crawler
    * @param args
    */
   def main(args: Array[String]) {
 
-    val crawlerActor = system.actorOf(Props(new CrawlerActor("nba.com", "https://")), name = "crawlerActor")
+    //TODO: arg length checking
+    val domain = args(0).trim
+    val protocol = "http://" //for now, restrict initial domain to http
 
-    crawlerActor ! "start"
+    val crawler = new DefaultCrawler(domain, protocol)
+
+    crawler.start
+
   }
 }

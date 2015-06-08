@@ -10,7 +10,6 @@ import dispatch._
 import Defaults._
 
 trait HtmlResult {
-  def content: Node
   def requestUri: String
 }
 
@@ -35,9 +34,9 @@ case class OkResponse (content: Node, requestUri: String) extends HtmlResult
  *
  * @param requestUri
  */
-case class MalformedUrl (requestUri: String) extends HtmlResult {
-  def content:Node = null
-}
+case class MalformedUrl (requestUri: String) extends HtmlResult
+
+case class RequestTimeout (requestUri: String) extends HtmlResult
 
 /**
  * Static namespace to load HTML as XML
@@ -47,10 +46,6 @@ object HtmlLoader {
   lazy val adapter = new NoBindingFactoryAdapter
   //parser to convert HTML to well-formed XML
   lazy val parser = (new SAXFactoryImpl).newSAXParser
-
-  val http = Http.configure(
-    _.setFollowRedirects(true)
-    .setAllowPoolingConnection(true).setRequestTimeoutInMs(15000).setConnectionTimeoutInMs(15000))
 
   /**
    * Connects to a uri (assumed to be over http) and loads HTML into a well-formed {scala.xml.Node}
@@ -62,21 +57,24 @@ object HtmlLoader {
 
     try {
 
-      val request = http(url(uri) OK as.String).option
+      val http = Http.configure(
+        _.setFollowRedirects(true).setIdleConnectionTimeoutInMs(7000).setRequestTimeoutInMs(7000).setConnectionTimeoutInMs(7000))
 
-      (for (c <- request) yield {
-        c match {
-          case Some(s) =>
+      val request = http(url(uri) OK as.String)
+
+      for(r <- request) yield {
+        r match {
+          case s:String =>
             val inputStream = new ByteArrayInputStream(s.getBytes(StandardCharsets.UTF_8))
             OkResponse(adapter.loadXML(new InputSource(inputStream), parser), uri)
-
-          case None =>
+          case _ =>
             InvalidResponse(uri)
         }
-      })
+      }
     } catch {
-      case e:Throwable => Future{MalformedUrl(uri)}
+      case _:Throwable =>
+        println("badness")
+        Future{MalformedUrl(uri)}
     }
   }
-
 }

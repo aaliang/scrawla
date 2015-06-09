@@ -1,12 +1,14 @@
 package crawler
 
 import akka.actor.{ActorSystem, Props, ActorRefFactory}
+import akka.pattern.{AskTimeoutException, ask}
 import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
 import scala.concurrent.duration._
-import scala.xml.Node
-import akka.pattern.{AskTimeoutException, ask}
 import scala.concurrent.ExecutionContext.Implicits.global
+import scala.util.{Try, Success, Failure}
+import scala.xml.Node
+
 
 //The following file contains traits and classes governing how a generic crawler should behave
 //and interact with its minion actor(s)
@@ -78,6 +80,7 @@ trait BaseCrawler {
   //immutables
   lazy val httpRequester = system.actorOf(Props[RequesterActor].withDispatcher("request-dispatcher"), name = "requester")
 
+  //http agent concurrency limit
   val OUTBOUND_LIMIT = 6
 
   //mutable
@@ -87,7 +90,6 @@ trait BaseCrawler {
 
   //mutable references
   var queued = scala.collection.mutable.LinkedHashSet[String]()
-
 
   /**
    * Delegates outbound http requests (up to the outbound limit quota) to the {httpRequester}
@@ -134,68 +136,100 @@ trait BaseCrawler {
   }
 
   /**
+   * Handles any case that are matched when the http request ask returns successfully completes without a failure.
+   * It is important to note that this is on the future, not the actual http request therefore timeouts, 500s, and the
+   * like are possibly returned here (for now). In the future, may use future composition to make this more semantically
+   * correct.
+   *
+   * @param requestingUrl
+   * @param resp
+   * @return
+   */
+  def handleRequestSuccess (requestingUrl: String, resp:Any) = resp match {
+    /**
+     * If we receive an {OkResponse}, that's great; we'll get all relevant items from the html and try to
+     * visit any matched anchor links
+     */
+    case OkResponse(pageNode, uri) =>
+      outboundRequests.remove(requestingUrl)
+      queued.remove(requestingUrl)
+      try {
+        val page = processHtmlElements(pageNode, requestingUrl, pathToFollow(baseUrl, requestingUrl) _)
+        val notVisitedYet = page.anchors.filter(!nodeMap.contains(_)).filter(!queued.contains(_))
+        nodeMap.put(requestingUrl, page)
+        queued ++= notVisitedYet
+      } finally {
+        delegateRequestsUpToQuota
+      }
+
+    /**
+     * If we receive an {InvalidResponse}, that's fine; we'll just mark it as null such that we don't try again
+     */
+    case BadResponse(uri, fallbacks) =>
+      nodeMap.put(requestingUrl, null) //todo: need a link
+
+      outboundRequests.remove(requestingUrl)
+      queued.remove(requestingUrl)
+
+      val newFallbacks = fallbacks.tail
+      if (!newFallbacks.isEmpty) {
+        visitPage(newFallbacks)
+      } else {
+        delegateRequestsUpToQuota
+      }
+
+    case rest =>
+      outboundRequests.remove(requestingUrl)
+      queued.remove(requestingUrl)
+      delegateRequestsUpToQuota
+
+  }
+
+  /**
+   * Handles any case where the http request ask fails. This does not correspond to http error codes, as it is not the
+   * same thing. Currently it is only possible that this will trip during and ask timeout. See above for futures.
+   *
+   * @param requestingUrl
+   * @param resp
+   * @return
+   */
+  def handleRequestFailure (requestingUrl:String, resp:Any) = resp match {
+    case e: AskTimeoutException =>
+      println("ask timeout: " + requestingUrl)
+      outboundRequests.remove(requestingUrl)
+      queued.remove(requestingUrl)
+      delegateRequestsUpToQuota
+    case other: Throwable =>
+      println(other)
+      outboundRequests.remove(requestingUrl)
+      queued.remove(requestingUrl)
+      delegateRequestsUpToQuota
+  }
+
+  /**
+   * Combined future callback for a http request
+   *
+   * @param requestingUrl
+   * @param e
+   * @return
+   */
+  def handleRequestComplete(requestingUrl:String)(e:Try[Any]) = e match {
+    case Success(e) => handleRequestSuccess(requestingUrl, e)
+    case Failure(e) => handleRequestFailure(requestingUrl, e)
+  }
+
+  /**
    * Delegates visiting a {uri} to the {httpRequester}
    *
    * @param fallbacks the uri to visit
    */
   def visitPage(fallbacks: List[String]) {
-    val fut = httpRequester ? HttpRequest(fallbacks)
 
     val requestingUrl = fallbacks.head
     outboundRequests.add(requestingUrl)
-
     //    println(outboundRequests)
 
-    fut.onSuccess {
-      /**
-       * If we receive an {OkResponse}, that's great; we'll get all relevant items from the html and try to
-       * visit any matched anchor links
-       */
-      case OkResponse(pageNode, uri) =>
-        outboundRequests.remove(requestingUrl)
-        queued.remove(requestingUrl)
-        try {
-          val page = processHtmlElements(pageNode, requestingUrl, pathToFollow(baseUrl, requestingUrl) _)
-          val notVisitedYet = page.anchors.filter(!nodeMap.contains(_)).filter(!queued.contains(_))
-          nodeMap.put(requestingUrl, page)
-          queued ++= notVisitedYet
-        } finally {
-          delegateRequestsUpToQuota
-        }
-
-      /**
-       * If we receive an {InvalidResponse}, that's fine; we'll just mark it as null such that we don't try again
-       */
-      case BadResponse(uri, fallbacks) =>
-        nodeMap.put(requestingUrl, null) //todo: need a link
-
-        outboundRequests.remove(requestingUrl)
-        queued.remove(requestingUrl)
-
-        val newFallbacks = fallbacks.tail
-        if (!newFallbacks.isEmpty){
-          visitPage(newFallbacks)
-        } else {
-          delegateRequestsUpToQuota
-        }
-
-      case rest =>
-        outboundRequests.remove(requestingUrl)
-        queued.remove(requestingUrl)
-        delegateRequestsUpToQuota
-    }
-
-    fut.onFailure {
-      case e:AskTimeoutException =>
-        println("ask timeout: " + requestingUrl)
-        outboundRequests.remove(requestingUrl)
-        queued.remove(requestingUrl)
-        delegateRequestsUpToQuota
-      case other:Throwable =>
-        outboundRequests.remove(requestingUrl)
-        queued.remove(requestingUrl)
-        delegateRequestsUpToQuota
-    }
+    httpRequester ? HttpRequest(fallbacks) onComplete handleRequestComplete(requestingUrl) _
   }
 
   /**

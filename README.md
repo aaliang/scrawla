@@ -7,8 +7,16 @@ Base implementation will follow same domain links. Normalization is to consisten
 predict variant urls that may appear, although this is optimistic, and may very well
 request more urls than needed (in the worst case)
 
-Http requests are dispatched asynchronously, with an overridable concurrency limit
-(yet to be configged out)
+Http requests are dispatched asynchronously via a request agent actor, with an
+overridable concurrency limit set to 6 (yet to be configured out)
+
+Base crawlers should implement the BaseCrawler trait, and there are some abstracts that
+need to be fulfilled. DefaultCrawler is the full implementation, and is invoked during
+runs of the main program.
+
+Extended crawlers should be able to easily override or implement the trait/Default class
+to follow reference criteria as they see fit, and to apply any normalization strategies to
+pass along links to the request dispatcher.
 
 Build/Run
 ---------

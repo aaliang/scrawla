@@ -1,4 +1,4 @@
-package crawler
+package scrawla
 
 import scalax.file.Path
 

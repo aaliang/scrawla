@@ -1,4 +1,4 @@
-package crawler
+package scrawla
 
 import java.io.ByteArrayInputStream
 import java.nio.charset.StandardCharsets

@@ -1,4 +1,4 @@
-package crawler
+package scrawla
 import java.net.ConnectException
 import java.util.concurrent.{TimeoutException}
 

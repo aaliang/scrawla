@@ -1,4 +1,4 @@
-package crawler
+package scrawla
 
 import org.scalatest.FunSpec
 

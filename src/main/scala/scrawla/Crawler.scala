@@ -1,4 +1,4 @@
-package crawler
+package scrawla
 
 /**
  * Default Crawler implementation. This will only follow links pointing to the same domain

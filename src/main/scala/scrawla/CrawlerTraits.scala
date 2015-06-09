@@ -1,4 +1,4 @@
-package crawler
+package scrawla
 
 import akka.actor.{ActorSystem, Props, ActorRefFactory}
 import akka.pattern.{AskTimeoutException, ask}

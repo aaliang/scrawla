@@ -2,7 +2,17 @@ About
 -----
 Extensible functional webcrawler.
 
-You can determine which anchor links to follow, and normalization strategies for urls.
+Provides a set of classes and traits to implement a webcrawler with the following features:
+  1. directive function to determine which anchor links/sources/etc to follow
+  2. normalization strategies for urls.
+  3. fallback and retry strategies for bad requests
+  4. concurrent http request pooling
+  5. redirect support (WIP)
+  6. deduplication (no url accessed more multiple times)  
+
+The underlying datastructure stores the sitemap as a directed graph, backed by a mutable
+HashMap. Support may eventually be provided to flush this to disk intermittently.
+
 Base implementation will follow same domain links. Normalization is to consistently
 predict variant urls that may appear, although this is optimistic, and may very well
 request more urls than needed (in the worst case)

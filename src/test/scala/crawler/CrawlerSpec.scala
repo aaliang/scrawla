@@ -9,7 +9,7 @@ class CrawlerSpec extends FunSpec with BeforeAndAfter with BeforeAndAfterEach {
   val crawler = new DefaultCrawler(base, "http://")
 
   describe ("accumulatePartial tests") {
-    val getIfElligible = crawler.accumulatePartial(base, "http://www.mysite.com/a/") _
+    val getIfElligible = crawler.pathToFollow(base, "http://www.mysite.com/a/") _
 
     it("ignores #") {
       assert(getIfElligible("#") === None)
@@ -45,7 +45,7 @@ class CrawlerSpec extends FunSpec with BeforeAndAfter with BeforeAndAfterEach {
       <a href="/my/page"></a>
     </html>
 
-    val accumulateOptionFn = crawler.accumulatePartial(base, "http://www.mysite.com") _
+    val accumulateOptionFn = crawler.pathToFollow(base, "http://www.mysite.com") _
     val pageSummary = crawler.processHtmlElements(page, "http://www.mysite.com", accumulateOptionFn)
 
     it ("detects the correct number of resources") {
@@ -73,7 +73,7 @@ class CrawlerSpec extends FunSpec with BeforeAndAfter with BeforeAndAfterEach {
         <a href="#stuff"></a>
       </html>
 
-    val accumulateOptionFn = crawler.accumulatePartial(base, "http://www.mysite.com") _
+    val accumulateOptionFn = crawler.pathToFollow(base, "http://www.mysite.com") _
     val pageSummary = crawler.processHtmlElements(page, "http://www.mysite.com", accumulateOptionFn)
 
     assert(pageSummary.anchors.isEmpty)
@@ -98,7 +98,7 @@ class CrawlerSpec extends FunSpec with BeforeAndAfter with BeforeAndAfterEach {
     </html>
 
 
-    val accumulateOptionFn = crawler.accumulatePartial(base, "http://www.mysite.com/something") _
+    val accumulateOptionFn = crawler.pathToFollow(base, "http://www.mysite.com/something") _
     val pageSummary = crawler.processHtmlElements(page, "http://www.mysite.com/something", accumulateOptionFn)
 
     it ("detects the assets that live on the same domain, and normalizes them correctly") {
@@ -128,7 +128,7 @@ class CrawlerSpec extends FunSpec with BeforeAndAfter with BeforeAndAfterEach {
       </html>
 
 
-    val accumulateOptionFn = crawler.accumulatePartial(base, "http://www.mysite.com/something") _
+    val accumulateOptionFn = crawler.pathToFollow(base, "http://www.mysite.com/something") _
     val pageSummary = crawler.processHtmlElements(page, "http://www.mysite.com/something", accumulateOptionFn)
 
     it ("flattens duplicates (if any)") {

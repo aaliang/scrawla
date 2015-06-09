@@ -29,7 +29,7 @@ class RequesterActor extends Actor {
 
       fut.onSuccess {
         case validResult:OkResponse =>
-          println("visted: " + url)
+          println("OK: " + url)
           binded ! validResult
         case InvalidResponse(badUrl) =>
           println("invalid: " + badUrl)

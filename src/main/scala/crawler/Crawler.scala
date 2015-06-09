@@ -1,6 +1,6 @@
 package crawler
 
-import akka.actor.{Props, ActorSystem}
+import akka.actor.{ActorContext, Props, ActorSystem}
 import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
 import scala.concurrent.duration._
@@ -19,9 +19,13 @@ import scala.concurrent.ExecutionContext.Implicits.global
  */
 case class Page(uri: String, anchors: List[String], links: List[String], scripts: List[String], images: List[String])
 
-case class RelPath(path: String)
-case class AbsPath(path: String)
-case object NonePath
+trait PathType
+
+case class RelPath(path: String, fromPath:String) extends PathType
+
+case class AbsPath(path: String) extends PathType
+
+case object NonePath extends PathType
 
 /**
  * Currently the only crawler type. Will only follow links on the same domain
@@ -30,21 +34,28 @@ case object NonePath
  */
 class DefaultCrawler (baseUrl: String, protocol: String = "http://") {
 
-  val conf = ConfigFactory.load()
+  //child actor system
+  val system = ActorSystem("crawlerSystem", ConfigFactory.load.getConfig("crawler"))
 
-  val system = ActorSystem("crawlerSystem", conf.getConfig("crawler"))
-
-  val httpRequester = system.actorOf(Props[RequesterActor].withDispatcher("request-dispatcher"), name = "requester")
-
+  //implicits
   implicit val timeout = Timeout(8 seconds)
 
-  //The following two members contain mutable state.
-  val nodeMap = scala.collection.mutable.Map[String, Page]()
-  var queued = scala.collection.mutable.LinkedHashSet[String]()
-  val outboundRequests = scala.collection.mutable.Set[String]()
+  //immutables
+  val httpRequester = system.actorOf(Props[RequesterActor].withDispatcher("request-dispatcher"), name = "requester")
   val OUTBOUND_LIMIT = 6
 
-  def take(): Unit = {
+  //mutable
+  val nodeMap = scala.collection.mutable.Map[String, Page]()
+  val outboundRequests = scala.collection.mutable.Set[String]()
+  //for now, the mutables+refs are done oo style.
+
+  //mutable references
+  var queued = scala.collection.mutable.LinkedHashSet[String]()
+
+  /**
+   * Delegates outbound http requests (up to the outbound limit quota) to the {httpRequester}
+   */
+  def delegateRequestsUpToQuota {
     val (take, remainder) = queued.splitAt(OUTBOUND_LIMIT - outboundRequests.size)
     queued = remainder
     take.foreach(s => visitPage(UrlUtils.getNormalizedCandidates(s)))
@@ -77,7 +88,7 @@ class DefaultCrawler (baseUrl: String, protocol: String = "http://") {
           nodeMap.put(requestingUrl, page)
           queued ++= notVisitedYet
         } finally {
-          take
+          delegateRequestsUpToQuota
         }
 
       /**
@@ -93,15 +104,13 @@ class DefaultCrawler (baseUrl: String, protocol: String = "http://") {
         if (!newFallbacks.isEmpty){
           visitPage(newFallbacks)
         } else {
-          take
+          delegateRequestsUpToQuota
         }
 
       case rest =>
         outboundRequests.remove(requestingUrl)
         queued.remove(requestingUrl)
-        take
-
-
+        delegateRequestsUpToQuota
     }
 
     fut.onFailure {
@@ -109,11 +118,11 @@ class DefaultCrawler (baseUrl: String, protocol: String = "http://") {
         println("ask timeout: " + requestingUrl)
         outboundRequests.remove(requestingUrl)
         queued.remove(requestingUrl)
-        take
+        delegateRequestsUpToQuota
       case other:Throwable =>
         outboundRequests.remove(requestingUrl)
         queued.remove(requestingUrl)
-        take
+        delegateRequestsUpToQuota
     }
   }
 
@@ -189,7 +198,7 @@ class DefaultCrawler (baseUrl: String, protocol: String = "http://") {
     )
 
     //regexes are unmaintainable!
-    val cand = candidatePath.trim match {
+    normalize(candidatePath.trim match {
       case "" =>
         NonePath
       case s if (s.startsWith("javascript:")
@@ -211,23 +220,20 @@ class DefaultCrawler (baseUrl: String, protocol: String = "http://") {
         || acceptAbs.exists(s.startsWith(_))) =>
         AbsPath(s)
       case s if s.startsWith(".") =>
-        RelPath(s)
-      case s => s match {
-        case ss if (List("http://", "https://", "www.").exists(ss.startsWith(_))) =>
-          NonePath
-        case ss =>
-          RelPath(ss)
-      }
-    }
+        RelPath(s, traversedUri)
+      case s if (Seq("http://", "https://", "www.").exists(s.startsWith(_))) =>
+        NonePath
+      case s => RelPath(s, traversedUri)
+    })
+  }
 
-    cand match {
-      case AbsPath(path) =>
-        Some(UrlUtils.normalize(path, defaultNormalizationFn))
-      case RelPath(s) =>
-        val relPath = UrlUtils.resolveRelativeOptimistic(traversedUri, s)
-        Some(UrlUtils.normalize(relPath, defaultNormalizationFn))
-      case NonePath => None
-    }
+  def normalize (candidate:PathType):Option[String] = candidate match {
+    case AbsPath(path) =>
+      Some(UrlUtils.normalize(path, defaultNormalizationFn))
+    case RelPath(path, fromPath) =>
+      val relPath = UrlUtils.resolveRelativeOptimistic(fromPath, path)
+      Some(UrlUtils.normalize(relPath, defaultNormalizationFn))
+    case NonePath => None
   }
 
 }

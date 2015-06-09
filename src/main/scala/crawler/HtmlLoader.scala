@@ -16,9 +16,7 @@ trait HtmlResult {
 /**
  * ADT for an invalid result (404, 403, 401, etc)
  */
-case class InvalidResponse (requestUri: String) extends HtmlResult {
-  def content:Node = null
-}
+case class InvalidResponse (requestUri: String) extends HtmlResult
 
 /**
  * ADT for a successfully loaded result (200)

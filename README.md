@@ -34,8 +34,8 @@ Build/Run
 
 Requirements
 ------------
- Java. Works on Java 8, should work on 7+
- sbt
+ 1. Java. Works on Java 8, should work on 7+
+ 2. sbt
 
 Known Issues
 ------------
